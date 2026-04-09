@@ -195,4 +195,4 @@ MIT License — use, modifique e distribua livremente.
 
 ---
 
-**Feito com Claude Code por [Sergio Lima](https://github.com/sergiolimasks)**
+**Feito por [Sergio Lima](https://github.com/sergiolimasks)**
