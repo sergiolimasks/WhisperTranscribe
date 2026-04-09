@@ -4,7 +4,7 @@
 
 WhisperTranscribe e um app nativo macOS que usa [WhisperKit](https://github.com/argmaxinc/WhisperKit) (Apple Neural Engine) para transcrever arquivos de audio e video diretamente no seu computador. Tudo roda localmente — seus dados nunca saem da sua maquina.
 
-![WhisperTranscribe Screenshot](assets/screenshot.png)
+![WhisperTranscribe Screenshot](assets/screenshot.jpg)
 
 ---
 
