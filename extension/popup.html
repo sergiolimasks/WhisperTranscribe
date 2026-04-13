@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      width: 320px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0d0d1a;
+      color: #eeeeff;
+      padding: 16px;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+    .logo {
+      width: 32px; height: 32px;
+      background: #7c6cf0;
+      border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      font-weight: bold; font-size: 18px; color: #fff;
+    }
+    .title { font-size: 15px; font-weight: 600; }
+    .status {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 12px; color: #6a6a90;
+      margin-bottom: 14px;
+    }
+    .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #f06060;
+    }
+    .dot.online { background: #00d4aa; }
+    .url-box {
+      width: 100%;
+      background: #12122a;
+      border: 1px solid #252545;
+      border-radius: 8px;
+      padding: 10px;
+      color: #b0b0d0;
+      font-size: 12px;
+      word-break: break-all;
+      margin-bottom: 12px;
+      min-height: 40px;
+    }
+    .btn {
+      width: 100%;
+      padding: 10px;
+      background: #7c6cf0;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .btn:hover { background: #8f82f5; }
+    .btn:disabled { background: #3a3a6a; cursor: not-allowed; }
+    .feedback {
+      text-align: center;
+      font-size: 12px;
+      margin-top: 10px;
+      color: #00d4aa;
+      min-height: 16px;
+    }
+    .feedback.error { color: #f06060; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="logo">W</div>
+    <span class="title">WhisperTranscribe</span>
+  </div>
+  <div class="status">
+    <div class="dot" id="status-dot"></div>
+    <span id="status-text">Verificando...</span>
+  </div>
+  <div class="url-box" id="url-display">Detectando URL...</div>
+  <button class="btn" id="send-btn" disabled>Transcrever</button>
+  <div class="feedback" id="feedback"></div>
+  <script src="popup.js"></script>
+</body>
+</html>
