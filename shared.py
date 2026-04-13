@@ -11,6 +11,17 @@ if not os.path.exists(WHISPERKIT):
     if found:
         WHISPERKIT = found
 
+YTDLP = "/opt/homebrew/bin/yt-dlp"
+
+if not os.path.exists(YTDLP):
+    import shutil as _shutil
+    _found = _shutil.which("yt-dlp")
+    if _found:
+        YTDLP = _found
+
+DOWNLOADS_DIR = os.path.join(os.path.expanduser("~"), ".whisper_transcribe", "downloads")
+os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+
 AUDIO_VIDEO_EXTENSIONS = {
     ".mp4", ".mov", ".m4a", ".mp3", ".wav", ".webm",
     ".ogg", ".flac", ".aac", ".mkv", ".avi", ".wma",
