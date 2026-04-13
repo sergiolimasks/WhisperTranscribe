@@ -33,7 +33,7 @@ if ! command -v brew &>/dev/null; then
 fi
 
 # --- Instalar WhisperKit CLI ---
-echo "[1/4] Instalando WhisperKit CLI..."
+echo "[1/5] Instalando WhisperKit CLI..."
 if command -v whisperkit-cli &>/dev/null; then
     echo "  -> whisperkit-cli ja instalado ($(whisperkit-cli --version 2>/dev/null || echo 'ok'))"
 else
@@ -41,8 +41,17 @@ else
     echo "  -> whisperkit-cli instalado com sucesso!"
 fi
 
+# --- Instalar yt-dlp ---
+echo "[2/5] Instalando yt-dlp..."
+if command -v yt-dlp &>/dev/null; then
+    echo "  -> yt-dlp ja instalado"
+else
+    brew install yt-dlp
+    echo "  -> yt-dlp instalado com sucesso!"
+fi
+
 # --- Verificar Python 3 ---
-echo "[2/4] Verificando Python 3..."
+echo "[3/5] Verificando Python 3..."
 if ! command -v python3 &>/dev/null; then
     echo "  -> Python 3 nao encontrado. Instalando via Homebrew..."
     brew install python@3.12
@@ -52,7 +61,7 @@ PYTHON_VERSION=$(python3 --version 2>&1)
 echo "  -> $PYTHON_VERSION"
 
 # --- Verificar tkinter ---
-echo "[3/4] Verificando tkinter..."
+echo "[4/5] Verificando tkinter..."
 if ! python3 -c "import tkinter" &>/dev/null; then
     echo "  -> tkinter nao encontrado. Instalando python-tk..."
     brew install python-tk@3.12
@@ -60,7 +69,7 @@ fi
 echo "  -> tkinter OK"
 
 # --- Criar venv e instalar deps ---
-echo "[4/4] Criando ambiente e compilando o app..."
+echo "[5/5] Criando ambiente e compilando o app..."
 VENV_DIR="$(pwd)/.venv"
 
 python3 -m venv "$VENV_DIR"
@@ -95,6 +104,12 @@ else
     exit 1
 fi
 
+echo ""
+echo "Para instalar a extensao do Chrome:"
+echo "  1. Abra chrome://extensions no Chrome"
+echo "  2. Ative o 'Modo do desenvolvedor' (canto superior direito)"
+echo "  3. Clique em 'Carregar sem compactacao'"
+echo "  4. Selecione a pasta: $(pwd)/extension"
 echo ""
 echo "Pronto! Abra o WhisperTranscribe e comece a transcrever."
 echo ""
