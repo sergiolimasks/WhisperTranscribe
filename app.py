@@ -508,14 +508,14 @@ class WhisperApp(ctk.CTk):
 
     def _check_dependencies(self):
         """Check all dependencies and show guidance for missing ones."""
-        import shutil
         missing = []
 
-        # Check Homebrew
-        has_brew = shutil.which("brew") is not None
+        # Check paths directly (shutil.which fails inside .app bundles due to minimal PATH)
+        brew_paths = ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
+        whisperkit_paths = ["/opt/homebrew/bin/whisperkit-cli", "/usr/local/bin/whisperkit-cli"]
 
-        # Check whisperkit-cli
-        has_whisperkit = os.path.exists(WHISPERKIT) or shutil.which("whisperkit-cli") is not None
+        has_brew = any(os.path.exists(p) for p in brew_paths)
+        has_whisperkit = os.path.exists(WHISPERKIT) or any(os.path.exists(p) for p in whisperkit_paths)
 
         if not has_brew:
             missing.append(
