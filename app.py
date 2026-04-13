@@ -9,6 +9,7 @@ import threading
 import os
 import json
 import time
+import logging
 from datetime import datetime
 from pathlib import Path
 from shared import COLORS, AUDIO_VIDEO_EXTENSIONS, WHISPERKIT, format_duration, format_file_size
@@ -20,8 +21,18 @@ from whisper_server import WhisperServer
 HISTORY_DIR = Path.home() / ".whisper_transcribe"
 HISTORY_FILE = HISTORY_DIR / "history.json"
 SETTINGS_FILE = HISTORY_DIR / "settings.json"
+LOG_FILE = HISTORY_DIR / "app.log"
 
 HISTORY_DIR.mkdir(exist_ok=True)
+
+# --- Logging ---
+logging.basicConfig(
+    filename=str(LOG_FILE),
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("WhisperTranscribe")
 
 # --- Theme ---
 ctk.set_appearance_mode("dark")
@@ -57,7 +68,7 @@ class SettingsManager:
     def _load(self):
         if SETTINGS_FILE.exists():
             try:
-                saved = json.loads(SETTINGS_FILE.read_text())
+                saved = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
                 merged = {**self.DEFAULTS, **saved}
                 return merged
             except Exception:
@@ -65,7 +76,7 @@ class SettingsManager:
         return dict(self.DEFAULTS)
 
     def save(self):
-        SETTINGS_FILE.write_text(json.dumps(self.settings, ensure_ascii=False, indent=2))
+        SETTINGS_FILE.write_text(json.dumps(self.settings, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def get(self, key, default=None):
         return self.settings.get(key, default if default is not None else self.DEFAULTS.get(key))
@@ -84,13 +95,13 @@ class HistoryManager:
     def _load(self):
         if HISTORY_FILE.exists():
             try:
-                return json.loads(HISTORY_FILE.read_text())
+                return json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
             except Exception:
                 return []
         return []
 
     def save(self):
-        HISTORY_FILE.write_text(json.dumps(self.history, ensure_ascii=False, indent=2))
+        HISTORY_FILE.write_text(json.dumps(self.history, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def add(self, filename, filepath, text, duration_secs=0, segments=None):
         word_count = len(text.split()) if text else 0
@@ -419,6 +430,7 @@ class WhisperApp(ctk.CTk):
 
     def __init__(self):
         super().__init__()
+        log.info("=== WhisperTranscribe starting ===")
 
         self.settings = SettingsManager()
         self.history_mgr = HistoryManager()
@@ -448,11 +460,14 @@ class WhisperApp(ctk.CTk):
 
         self._build_ui()
         self._refresh_history()
+        log.info("UI built, checking dependencies...")
 
         # First-run dependency check
         if not self._check_dependencies():
+            log.warning("Dependencies missing, aborting init")
             return
 
+        log.info("Dependencies OK, starting server...")
         # Show loading state and start server
         self._show_server_loading()
 
@@ -495,12 +510,14 @@ class WhisperApp(ctk.CTk):
 
     def _on_server_ready(self):
         """Called when WhisperKit server is ready."""
+        log.info("Server READY")
         self._server_ready = True
         self.progress.set_complete("✓ WhisperKit pronto")
         self._restore_upload_btn()
 
     def _on_server_error(self, error_msg):
         """Called if WhisperKit server fails to start."""
+        log.error(f"Server FAILED: {error_msg}")
         self._server_ready = False
         self.progress.stop()
         self.progress.set_status(f"✕ Erro: {error_msg}")
@@ -602,6 +619,7 @@ class WhisperApp(ctk.CTk):
 
     def _on_files_dropped(self, file_paths):
         """Handle files dropped via native macOS drag-and-drop."""
+        log.info(f"Files dropped: {len(file_paths)} files")
         if file_paths:
             self.after(0, lambda fps=list(file_paths): self._add_to_queue(fps))
 
@@ -1110,7 +1128,9 @@ class WhisperApp(ctk.CTk):
 
     def _add_to_queue(self, filepaths):
         """Add files to the batch queue and start processing if idle."""
+        log.info(f"_add_to_queue: {len(filepaths)} files, server_ready={self._server_ready}, is_ready={self.server.is_ready}")
         if not self._server_ready and not self.server.is_ready:
+            log.warning("Server not ready, retrying in 2s...")
             self.progress.set_status("Aguardando servidor iniciar...")
             # Retry after 2s
             self.after(2000, lambda fps=filepaths: self._add_to_queue(fps))
@@ -1215,8 +1235,35 @@ class WhisperApp(ctk.CTk):
         )
         thread.start()
 
+    def _restart_server_and_retry(self, filepath, filename):
+        """Restart the WhisperKit server and retry the transcription."""
+        self.after(0, lambda: self.progress.set_status(
+            "Reiniciando servidor WhisperKit..."
+        ))
+        lang = self.settings.get("language")
+        ready_event = threading.Event()
+        error_holder = {}
+
+        def on_ready():
+            self._server_ready = True
+            ready_event.set()
+
+        def on_error(e):
+            error_holder["msg"] = e
+            ready_event.set()
+
+        self.server.restart(language=lang, on_ready=on_ready, on_error=on_error)
+        ready_event.wait(timeout=120)
+
+        if "msg" in error_holder:
+            raise RuntimeError(f"Falha ao reiniciar servidor: {error_holder['msg']}")
+        if not self.server.is_ready:
+            raise RuntimeError("Timeout reiniciando servidor WhisperKit")
+
     def _run_transcription(self, filepath, filename):
+        log.info(f"_run_transcription START: {filename} (server_ready={self.server.is_ready})")
         start = time.time()
+        retried = False
         try:
             self.after(0, lambda: self.progress.set_status(
                 f"Transcrevendo {filename}..."
@@ -1238,9 +1285,26 @@ class WhisperApp(ctk.CTk):
 
             # Use server API if available, fallback to subprocess
             if self.server.is_ready:
-                result = self.server.transcribe(filepath, language=lang)
-                text = result.get("text", "").strip()
-                segments = result.get("segments", [])
+                try:
+                    log.info(f"Sending to server API: {filename}")
+                    result = self.server.transcribe(filepath, language=lang)
+                    text = result.get("text", "").strip()
+                    segments = result.get("segments", [])
+                    log.info(f"Transcription OK: {filename} ({len(text)} chars)")
+                except RuntimeError as e:
+                    log.error(f"Server error during transcription: {e}")
+                    if not retried and not self._transcription_cancelled:
+                        # Server died — restart and retry once
+                        retried = True
+                        self._restart_server_and_retry(filepath, filename)
+                        self.after(0, lambda: self.progress.set_status(
+                            f"Retomando transcrição de {filename}..."
+                        ))
+                        result = self.server.transcribe(filepath, language=lang)
+                        text = result.get("text", "").strip()
+                        segments = result.get("segments", [])
+                    else:
+                        raise
             else:
                 # Fallback: direct subprocess call
                 cmd = [WHISPERKIT, "transcribe", "--audio-path", filepath]
@@ -1296,6 +1360,7 @@ class WhisperApp(ctk.CTk):
             self.after(0, lambda: self._transcription_done(entry, elapsed))
 
         except Exception as e:
+            log.error(f"_run_transcription EXCEPTION: {type(e).__name__}: {e}", exc_info=True)
             self.after(0, self._stop_elapsed_timer)
             self.after(0, lambda: self._transcription_error(
                 f"Erro inesperado:\n\n{str(e)}"

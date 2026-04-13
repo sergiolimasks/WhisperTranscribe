@@ -82,15 +82,12 @@ if [[ -d "dist/WhisperTranscribe.app" ]]; then
     echo "O app foi gerado em: dist/WhisperTranscribe.app"
     echo ""
 
-    read -p "Deseja instalar em /Applications? (s/n) " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Ss]$ ]]; then
-        rm -rf /Applications/WhisperTranscribe.app
-        cp -R dist/WhisperTranscribe.app /Applications/
-        echo ""
-        echo "Instalado em /Applications/WhisperTranscribe.app"
-        echo "Voce pode abrir pelo Launchpad ou Spotlight!"
-    fi
+    echo "Instalando em /Applications..."
+    rm -rf /Applications/WhisperTranscribe.app
+    cp -R dist/WhisperTranscribe.app /Applications/
+    echo ""
+    echo "Instalado em /Applications/WhisperTranscribe.app"
+    echo "Voce pode abrir pelo Launchpad ou Spotlight!"
 else
     echo ""
     echo "ERRO: Falha ao compilar o app."

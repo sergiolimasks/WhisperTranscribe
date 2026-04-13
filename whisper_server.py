@@ -96,6 +96,23 @@ class WhisperServer:
         thread = threading.Thread(target=_run, daemon=True)
         thread.start()
 
+    def health_check(self):
+        """Ping /health to verify the server is actually responding."""
+        if not self._process or self._process.poll() is not None:
+            return False
+        try:
+            req = Request(f"{self.base_url}/health")
+            resp = urlopen(req, timeout=3)
+            return resp.status == 200
+        except (URLError, OSError):
+            return False
+
+    def restart(self, language=None, on_ready=None, on_error=None):
+        """Stop and restart the server."""
+        self.stop()
+        self._error = None
+        self.start(language=language, on_ready=on_ready, on_error=on_error)
+
     def stop(self):
         """Stop the server."""
         self._ready = False
@@ -167,8 +184,32 @@ class WhisperServer:
             method="POST",
         )
 
-        resp = urlopen(req, timeout=600)
-        data = json.loads(resp.read().decode())
+        # Use a thread to monitor server health while waiting for response
+        response_data = {}
+        error_holder = {}
+
+        def _do_request():
+            try:
+                resp = urlopen(req, timeout=600)
+                response_data["result"] = resp.read().decode()
+            except Exception as e:
+                error_holder["error"] = e
+
+        req_thread = threading.Thread(target=_do_request, daemon=True)
+        req_thread.start()
+
+        # Poll: wait for response while checking server health every 10s
+        while req_thread.is_alive():
+            req_thread.join(timeout=10)
+            if req_thread.is_alive() and not self.health_check():
+                raise RuntimeError(
+                    "Servidor WhisperKit parou de responder durante a transcrição"
+                )
+
+        if "error" in error_holder:
+            raise error_holder["error"]
+
+        data = json.loads(response_data["result"])
 
         if "error" in data and data.get("error"):
             raise RuntimeError(data.get("reason", "Erro desconhecido"))
