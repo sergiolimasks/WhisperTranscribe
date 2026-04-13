@@ -3,7 +3,7 @@
 
 import customtkinter as ctk
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 import subprocess
 import threading
 import os
@@ -11,58 +11,21 @@ import json
 import time
 from datetime import datetime
 from pathlib import Path
-import re
+from shared import COLORS, AUDIO_VIDEO_EXTENSIONS, WHISPERKIT, format_duration, format_file_size
+from batch_queue import BatchProcessor, QueuePanel
+from export_modal import ExportModal
+from whisper_server import WhisperServer
 
 # --- Config ---
 HISTORY_DIR = Path.home() / ".whisper_transcribe"
 HISTORY_FILE = HISTORY_DIR / "history.json"
 SETTINGS_FILE = HISTORY_DIR / "settings.json"
-WHISPERKIT = "/opt/homebrew/bin/whisperkit-cli"
 
 HISTORY_DIR.mkdir(exist_ok=True)
-
-# --- Supported formats ---
-AUDIO_VIDEO_EXTENSIONS = {
-    ".mp4", ".mov", ".m4a", ".mp3", ".wav", ".webm",
-    ".ogg", ".flac", ".aac", ".mkv", ".avi", ".wma",
-    ".m4v", ".3gp", ".opus", ".caf"
-}
 
 # --- Theme ---
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
-
-COLORS = {
-    "bg_dark": "#0a0a16",
-    "bg_main": "#0d0d1a",
-    "bg_card": "#161630",
-    "bg_card_hover": "#1e1e42",
-    "bg_card_selected": "#252550",
-    "bg_input": "#12122a",
-    "accent": "#7c6cf0",
-    "accent_hover": "#8f82f5",
-    "accent_dim": "#5a4ec4",
-    "accent_glow": "#7c6cf020",
-    "success": "#00d4aa",
-    "success_dim": "#00a080",
-    "warning": "#f0a030",
-    "danger": "#f06060",
-    "danger_hover": "#ff4444",
-    "text": "#eeeeff",
-    "text_secondary": "#b0b0d0",
-    "text_dim": "#6a6a90",
-    "text_muted": "#44445a",
-    "border": "#252545",
-    "border_accent": "#3a3a6a",
-    "divider": "#1a1a35",
-    "progress_bg": "#151530",
-    "progress_fill": "#7c6cf0",
-    "gradient_start": "#7c6cf0",
-    "gradient_end": "#00d4aa",
-    "tag_bg": "#1a1a40",
-    "drop_zone": "#1a1a3a",
-    "drop_zone_active": "#252560",
-}
 
 LANGUAGES = {
     "Português": "pt",
@@ -75,35 +38,6 @@ LANGUAGES = {
     "中文": "zh",
     "Auto-detectar": None,
 }
-
-
-def format_duration(secs):
-    """Format seconds into human readable duration."""
-    if secs < 60:
-        return f"{int(secs)}s"
-    mins = int(secs // 60)
-    s = int(secs % 60)
-    if mins < 60:
-        return f"{mins}m {s}s"
-    hours = mins // 60
-    mins = mins % 60
-    return f"{hours}h {mins}m"
-
-
-def format_file_size(path):
-    """Format file size in human readable format."""
-    try:
-        size = os.path.getsize(path)
-        if size < 1024:
-            return f"{size} B"
-        elif size < 1024 * 1024:
-            return f"{size / 1024:.1f} KB"
-        elif size < 1024 * 1024 * 1024:
-            return f"{size / (1024 * 1024):.1f} MB"
-        else:
-            return f"{size / (1024 * 1024 * 1024):.1f} GB"
-    except Exception:
-        return ""
 
 
 class SettingsManager:
@@ -134,7 +68,7 @@ class SettingsManager:
         SETTINGS_FILE.write_text(json.dumps(self.settings, ensure_ascii=False, indent=2))
 
     def get(self, key, default=None):
-        return self.settings.get(key, default or self.DEFAULTS.get(key))
+        return self.settings.get(key, default if default is not None else self.DEFAULTS.get(key))
 
     def set(self, key, value):
         self.settings[key] = value
@@ -158,7 +92,7 @@ class HistoryManager:
     def save(self):
         HISTORY_FILE.write_text(json.dumps(self.history, ensure_ascii=False, indent=2))
 
-    def add(self, filename, filepath, text, duration_secs=0):
+    def add(self, filename, filepath, text, duration_secs=0, segments=None):
         word_count = len(text.split()) if text else 0
         entry = {
             "id": int(time.time() * 1000),
@@ -171,6 +105,8 @@ class HistoryManager:
             "words": word_count,
             "file_size": format_file_size(filepath),
         }
+        if segments:
+            entry["segments"] = segments
         self.history.insert(0, entry)
         self.save()
         return entry
@@ -365,15 +301,18 @@ class HistoryCard(ctk.CTkFrame):
             command=lambda: on_delete(entry["id"])
         )
         del_btn.pack(side="right")
+        # Tag delete button so we can skip it in click binding
+        del_btn._is_delete_btn = True
 
-        # Bind click to all children
-        self.bind("<Button-1>", lambda e: on_click(entry))
-        for child in self.winfo_children():
-            child.bind("<Button-1>", lambda e: on_click(entry))
-            for grandchild in child.winfo_children():
-                grandchild.bind("<Button-1>", lambda e: on_click(entry))
-                for ggchild in grandchild.winfo_children():
-                    ggchild.bind("<Button-1>", lambda e: on_click(entry))
+        # Bind click to all children EXCEPT the delete button
+        def _bind_click(widget):
+            if getattr(widget, '_is_delete_btn', False):
+                return
+            widget.bind("<Button-1>", lambda e: on_click(entry))
+            for child in widget.winfo_children():
+                _bind_click(child)
+
+        _bind_click(self)
 
     def _make_tag(self, parent, text):
         tag = ctk.CTkLabel(
@@ -389,12 +328,14 @@ class HistoryCard(ctk.CTkFrame):
 
 
 class DropZone(ctk.CTkFrame):
-    """Drag & drop zone overlay."""
+    """Drag & drop zone overlay — clickable to open file picker."""
 
-    def __init__(self, parent, on_drop, **kwargs):
+    def __init__(self, parent, on_drop, on_click=None, **kwargs):
         super().__init__(parent, fg_color=COLORS["drop_zone"], corner_radius=16,
                          border_width=2, border_color=COLORS["border_accent"], **kwargs)
         self.on_drop = on_drop
+        self.on_click = on_click
+        self.configure(cursor="hand2")
 
         inner = ctk.CTkFrame(self, fg_color="transparent")
         inner.place(relx=0.5, rely=0.5, anchor="center")
@@ -411,7 +352,7 @@ class DropZone(ctk.CTkFrame):
         ).pack()
 
         ctk.CTkLabel(
-            inner, text="ou clique em 'Transcrever Arquivo'",
+            inner, text="ou clique para selecionar",
             font=("SF Pro Display", 13),
             text_color=COLORS["text_dim"]
         ).pack(pady=(4, 0))
@@ -422,6 +363,16 @@ class DropZone(ctk.CTkFrame):
             font=("SF Pro Display", 10),
             text_color=COLORS["text_muted"]
         ).pack(pady=(12, 0))
+
+        # Make the entire zone clickable
+        self.bind("<Button-1>", self._handle_click)
+        inner.bind("<Button-1>", self._handle_click)
+        for child in inner.winfo_children():
+            child.bind("<Button-1>", self._handle_click)
+
+    def _handle_click(self, event=None):
+        if self.on_click:
+            self.on_click()
 
 
 class StatsBar(ctk.CTkFrame):
@@ -474,7 +425,12 @@ class WhisperApp(ctk.CTk):
         self.is_transcribing = False
         self.selected_entry_id = None
         self.search_query = ""
-        self._queue = []  # batch queue
+        self._transcription_cancelled = False
+        self._current_process = None
+        self._elapsed_timer = None
+        self.batch = BatchProcessor()
+        self.server = WhisperServer()
+        self._server_ready = False
 
         w = self.settings.get("window_width")
         h = self.settings.get("window_height")
@@ -487,15 +443,18 @@ class WhisperApp(ctk.CTk):
         self.bind("<Command-o>", lambda e: self._pick_file())
         self.bind("<Command-n>", lambda e: self._pick_file())
         self.bind("<Command-f>", lambda e: self._focus_search())
-        self.bind("<Command-c>", lambda e: self._copy_text())
         self.bind("<Command-e>", lambda e: self._export_txt())
         self.bind("<Escape>", lambda e: self._clear_search())
 
-        # Enable drag & drop via tkinterdnd2 or fallback
-        self._setup_dnd()
-
         self._build_ui()
         self._refresh_history()
+
+        # First-run dependency check
+        if not self._check_dependencies():
+            return
+
+        # Show loading state and start server
+        self._show_server_loading()
 
         # Force window to front
         self.lift()
@@ -503,15 +462,158 @@ class WhisperApp(ctk.CTk):
         self.after(100, lambda: self.attributes('-topmost', False))
         self.focus_force()
 
-    def _setup_dnd(self):
-        """Setup drag and drop — try tkinterdnd2, fallback gracefully."""
-        self._dnd_available = False
+        # Defer DnD setup to after mainloop is running (avoids GIL crash)
+        self.after(500, self._setup_native_dnd)
+
+        # Shut down server when window closes
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _setup_native_dnd(self):
+        """Setup native macOS drag-and-drop via pyobjc."""
         try:
-            # Try to register as a drop target using Tk DnD
-            self.tk.call("package", "require", "tkdnd")
-            self._dnd_available = True
+            from macos_drop import enable_drop
+            enable_drop(self, self._on_files_dropped, extensions=AUDIO_VIDEO_EXTENSIONS)
+        except Exception as e:
+            print(f"[WhisperTranscribe] Drag & drop indisponível: {e}")
+
+        # Also handle macOS "Open With" / dock icon drops
+        try:
+            self.createcommand("::tk::mac::OpenDocument", self._tk_open_document)
         except Exception:
             pass
+
+    def _show_server_loading(self):
+        """Show loading state while WhisperKit server starts."""
+        self.upload_btn.configure(state="disabled", text="⏳ Iniciando...")
+        self.progress.start_pulse("Carregando modelo WhisperKit...")
+        lang = self.settings.get("language")
+        self.server.start(
+            language=lang,
+            on_ready=lambda: self.after(0, self._on_server_ready),
+            on_error=lambda e: self.after(0, lambda: self._on_server_error(e)),
+        )
+
+    def _on_server_ready(self):
+        """Called when WhisperKit server is ready."""
+        self._server_ready = True
+        self.progress.set_complete("✓ WhisperKit pronto")
+        self._restore_upload_btn()
+
+    def _on_server_error(self, error_msg):
+        """Called if WhisperKit server fails to start."""
+        self._server_ready = False
+        self.progress.stop()
+        self.progress.set_status(f"✕ Erro: {error_msg}")
+        self._restore_upload_btn()
+
+    def _check_dependencies(self):
+        """Check all dependencies and show guidance for missing ones."""
+        import shutil
+        missing = []
+
+        # Check Homebrew
+        has_brew = shutil.which("brew") is not None
+
+        # Check whisperkit-cli
+        has_whisperkit = os.path.exists(WHISPERKIT) or shutil.which("whisperkit-cli") is not None
+
+        if not has_brew:
+            missing.append(
+                "Homebrew (gerenciador de pacotes):\n"
+                '  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+            )
+
+        if not has_whisperkit:
+            missing.append(
+                "WhisperKit CLI (motor de transcrição):\n"
+                "  brew install whisperkit-cli"
+            )
+
+        if not missing:
+            return True
+
+        # Build the message
+        steps = "\n\n".join(f"{i+1}. {m}" for i, m in enumerate(missing))
+        messagebox.showwarning(
+            "Dependências necessárias",
+            f"Para usar o WhisperTranscribe, instale no Terminal:\n\n"
+            f"{steps}\n\n"
+            f"Após instalar, reinicie o WhisperTranscribe.",
+            parent=self
+        )
+
+        self.upload_btn.configure(state="disabled", text="Dependências ausentes")
+        self.progress.set_status("Instale as dependências e reinicie o app")
+
+        # Show install instructions in the text area
+        self._show_text_area()
+        self.preview_title.configure(text="Instalação necessária")
+        self.text_area.configure(state="normal")
+        self.text_area.delete("0.0", "end")
+
+        instructions = "Como instalar as dependências\n"
+        instructions += "=" * 40 + "\n\n"
+        instructions += "Abra o Terminal (Cmd+Espaço, digite 'Terminal') e execute:\n\n"
+
+        if not has_brew:
+            instructions += '1. Instalar Homebrew:\n'
+            instructions += '   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"\n\n'
+
+        if not has_whisperkit:
+            step = "2" if not has_brew else "1"
+            instructions += f'{step}. Instalar WhisperKit CLI:\n'
+            instructions += '   brew install whisperkit-cli\n\n'
+
+        instructions += "Depois feche e reabra o WhisperTranscribe."
+
+        self.text_area.insert("0.0", instructions)
+        self.text_area.configure(state="disabled")
+        return False
+
+    def _on_close(self):
+        """Shutdown server and close app."""
+        self.server.stop()
+        self.destroy()
+
+    def _show_about(self):
+        """Show About dialog."""
+        about = ctk.CTkToplevel(self)
+        about.title("Sobre")
+        about.configure(fg_color=COLORS["bg_main"])
+        about.resizable(False, False)
+        w, h = 360, 280
+        px = self.winfo_rootx() + (self.winfo_width() - w) // 2
+        py = self.winfo_rooty() + (self.winfo_height() - h) // 2
+        about.geometry(f"{w}x{h}+{px}+{py}")
+        about.transient(self)
+        about.grab_set()
+
+        # Logo
+        logo = ctk.CTkFrame(about, fg_color=COLORS["accent"], corner_radius=16, width=56, height=56)
+        logo.pack(pady=(24, 8))
+        logo.pack_propagate(False)
+        ctk.CTkLabel(logo, text="W", font=("SF Pro Display", 28, "bold"), text_color="#fff").place(relx=0.5, rely=0.5, anchor="center")
+
+        ctk.CTkLabel(about, text="WhisperTranscribe", font=("SF Pro Display", 20, "bold"), text_color=COLORS["text"]).pack()
+        ctk.CTkLabel(about, text="v2.0.0", font=("SF Pro Display", 13), text_color=COLORS["text_dim"]).pack(pady=(2, 8))
+        ctk.CTkLabel(about, text="Transcrição inteligente de áudio e vídeo\npara macOS com WhisperKit", font=("SF Pro Display", 12), text_color=COLORS["text_secondary"], justify="center").pack()
+        ctk.CTkLabel(about, text="Atalhos: Cmd+O (abrir) · Cmd+F (buscar) · Cmd+E (exportar)", font=("SF Pro Display", 10), text_color=COLORS["text_muted"], justify="center").pack(pady=(12, 0))
+        ctk.CTkButton(about, text="Fechar", width=80, height=28, fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"], command=about.destroy).pack(pady=(12, 0))
+
+    def _on_files_dropped(self, file_paths):
+        """Handle files dropped via native macOS drag-and-drop."""
+        if file_paths:
+            self.after(0, lambda fps=list(file_paths): self._add_to_queue(fps))
+
+    def _tk_open_document(self, *args):
+        """Handle macOS open document events (file drag onto dock icon)."""
+        for filepath in args:
+            filepath = str(filepath).strip("{}")
+            if os.path.isfile(filepath):
+                ext = os.path.splitext(filepath)[1].lower()
+                if ext in AUDIO_VIDEO_EXTENSIONS:
+                    self.after(0, lambda p=filepath: self._on_file_drop(p))
+                    return
 
     def _build_ui(self):
         # === HEADER ===
@@ -583,6 +685,16 @@ class WhisperApp(ctk.CTk):
         )
         self.lang_menu.pack(side="left")
 
+        # About button
+        ctk.CTkButton(
+            right_header, text="?", width=32, height=32,
+            font=("SF Pro Display", 14),
+            fg_color="transparent", hover_color=COLORS["bg_card"],
+            text_color=COLORS["text_dim"],
+            corner_radius=8,
+            command=self._show_about
+        ).pack(side="left", padx=(0, 6), pady=22)
+
         # Upload button
         self.upload_btn = ctk.CTkButton(
             right_header, text="  ＋  Transcrever",
@@ -636,6 +748,17 @@ class WhisperApp(ctk.CTk):
         )
         self.clear_btn.pack(side="right")
 
+        # Export all button
+        self.export_all_btn = ctk.CTkButton(
+            hist_header, text="Exportar",
+            font=("SF Pro Display", 11),
+            fg_color="transparent", hover_color=COLORS["bg_card"],
+            text_color=COLORS["text_dim"],
+            corner_radius=6, height=26, width=70,
+            command=self._open_export_modal
+        )
+        self.export_all_btn.pack(side="right", padx=(0, 4))
+
         # Search bar
         search_frame = ctk.CTkFrame(left, fg_color=COLORS["bg_input"],
                                      corner_radius=10, border_width=1,
@@ -661,6 +784,13 @@ class WhisperApp(ctk.CTk):
         )
         self.search_entry.pack(side="left", fill="both", expand=True, padx=(4, 10))
         self.search_entry.bind("<KeyRelease>", self._on_search)
+
+        # Queue panel (hidden by default)
+        self.queue_panel = QueuePanel(
+            left,
+            on_cancel_all=self._cancel_batch,
+            on_remove_item=self._remove_from_queue
+        )
 
         # History scroll
         self.history_scroll = ctk.CTkScrollableFrame(
@@ -688,6 +818,16 @@ class WhisperApp(ctk.CTk):
             text_color=COLORS["text"]
         )
         self.preview_title.pack(side="left")
+
+        # Close button (back to drop zone)
+        self.close_btn = ctk.CTkButton(
+            right_header_frame, text="✕", width=28, height=28,
+            font=("SF Pro Display", 13),
+            fg_color="transparent", hover_color=COLORS["bg_card_hover"],
+            text_color=COLORS["text_dim"],
+            corner_radius=6,
+            command=self._close_preview
+        )
 
         # Action buttons frame
         self.actions_frame = ctk.CTkFrame(right_header_frame, fg_color="transparent")
@@ -736,7 +876,7 @@ class WhisperApp(ctk.CTk):
         )
 
         # Drop zone (shown when no entry selected)
-        self.drop_zone = DropZone(self.content_container, on_drop=self._on_file_drop)
+        self.drop_zone = DropZone(self.content_container, on_drop=self._on_file_drop, on_click=self._pick_file)
 
         # Stats bar
         self.stats_bar = StatsBar(right)
@@ -750,19 +890,34 @@ class WhisperApp(ctk.CTk):
         self.text_area.pack_forget()
         self.drop_zone.pack(fill="both", expand=True)
         self.actions_frame.pack_forget()
+        self.close_btn.pack_forget()
         self.preview_title.configure(text="Comece sua transcrição")
         self.stats_bar.clear()
+        self.progress.stop()
+        self.progress.hide()
 
     def _show_text_area(self):
         """Show text area, hide drop zone."""
         self.drop_zone.pack_forget()
         self.text_area.pack(fill="both", expand=True)
+        self.close_btn.pack(side="right", padx=(6, 0))
         self.actions_frame.pack(side="right")
+
+    def _close_preview(self):
+        """Close the current transcription preview and return to drop zone."""
+        self.selected_entry_id = None
+        self._show_drop_zone()
+        self._refresh_history()
 
     def _on_language_change(self, choice):
         lang_code = LANGUAGES.get(choice)
         self.settings.set("language", lang_code)
         self.settings.set("language_name", choice)
+        # Restart server with new language if not transcribing
+        if not self.is_transcribing:
+            self._server_ready = False
+            self.server.stop()
+            self._show_server_loading()
 
     def _focus_search(self):
         self.search_entry.focus_set()
@@ -782,11 +937,15 @@ class WhisperApp(ctk.CTk):
         for widget in self.history_scroll.winfo_children():
             widget.destroy()
 
-        entries = self.history_mgr.search(self.search_query) if self.search_query else self.history_mgr.history
+        self._history_entries = (
+            self.history_mgr.search(self.search_query)
+            if self.search_query else self.history_mgr.history
+        )
+        self._history_rendered = 0
 
-        self.history_count.configure(text=str(len(entries)))
+        self.history_count.configure(text=str(len(self._history_entries)))
 
-        if not entries:
+        if not self._history_entries:
             if self.search_query:
                 msg = f"Nenhum resultado para '{self.search_query}'"
             else:
@@ -800,7 +959,15 @@ class WhisperApp(ctk.CTk):
             ).pack(pady=60)
             return
 
-        for entry in entries:
+        self._render_history_batch()
+
+    def _render_history_batch(self, batch_size=30):
+        """Render the next batch of history cards (lazy loading)."""
+        entries = self._history_entries
+        start = self._history_rendered
+        end = min(start + batch_size, len(entries))
+
+        for entry in entries[start:end]:
             is_selected = entry["id"] == self.selected_entry_id
             card = HistoryCard(
                 self.history_scroll, entry,
@@ -809,6 +976,29 @@ class WhisperApp(ctk.CTk):
                 is_selected=is_selected
             )
             card.pack(fill="x", pady=3)
+
+        self._history_rendered = end
+
+        # Add "load more" button if there are remaining entries
+        if end < len(entries):
+            remaining = len(entries) - end
+            self._load_more_btn = ctk.CTkButton(
+                self.history_scroll,
+                text=f"Carregar mais ({remaining} restantes)",
+                font=("SF Pro Display", 12),
+                fg_color=COLORS["bg_card"],
+                hover_color=COLORS["bg_card_hover"],
+                text_color=COLORS["text_dim"],
+                corner_radius=8, height=32,
+                command=self._load_more_history
+            )
+            self._load_more_btn.pack(fill="x", pady=(6, 3))
+
+    def _load_more_history(self):
+        """Load more history entries."""
+        if hasattr(self, '_load_more_btn'):
+            self._load_more_btn.destroy()
+        self._render_history_batch()
 
     def _show_entry(self, entry):
         self.selected_entry_id = entry["id"]
@@ -833,6 +1023,13 @@ class WhisperApp(ctk.CTk):
 
     def _clear_all_history(self):
         if not self.history_mgr.history:
+            return
+        confirm = messagebox.askyesno(
+            "Limpar histórico",
+            f"Tem certeza que deseja apagar todas as {len(self.history_mgr.history)} transcrições?\n\nEsta ação não pode ser desfeita.",
+            parent=self
+        )
+        if not confirm:
             return
         self.history_mgr.clear_all()
         self.selected_entry_id = None
@@ -885,44 +1082,127 @@ class WhisperApp(ctk.CTk):
             ))
 
     def _on_file_drop(self, filepath):
-        """Handle file drop."""
-        if self.is_transcribing:
-            return
+        """Handle single file drop."""
         if os.path.isfile(filepath):
             ext = os.path.splitext(filepath)[1].lower()
             if ext in AUDIO_VIDEO_EXTENSIONS:
-                self._start_transcription(filepath)
+                self._add_to_queue([filepath])
 
     def _pick_file(self, event=None):
-        if self.is_transcribing:
-            return
-
         filetypes = [
             ("Áudio e Vídeo", " ".join(f"*{ext}" for ext in sorted(AUDIO_VIDEO_EXTENSIONS))),
             ("Todos os arquivos", "*.*")
         ]
-        filepath = filedialog.askopenfilename(
-            title="Selecione o áudio ou vídeo",
+        filepaths = filedialog.askopenfilenames(
+            title="Selecione áudios ou vídeos",
             filetypes=filetypes
         )
-        if not filepath:
+        if not filepaths:
             return
+        valid = [
+            fp for fp in filepaths
+            if os.path.isfile(fp) and os.path.splitext(fp)[1].lower() in AUDIO_VIDEO_EXTENSIONS
+        ]
+        if valid:
+            self._add_to_queue(valid)
 
-        self._start_transcription(filepath)
+    # --- Batch queue ---
+
+    def _add_to_queue(self, filepaths):
+        """Add files to the batch queue and start processing if idle."""
+        if not self._server_ready and not self.server.is_ready:
+            self.progress.set_status("Aguardando servidor iniciar...")
+            # Retry after 2s
+            self.after(2000, lambda fps=filepaths: self._add_to_queue(fps))
+            return
+        self.batch.add_files(filepaths)
+        self._update_queue_panel()
+        if not self.is_transcribing:
+            self._process_next_in_queue()
+
+    def _process_next_in_queue(self):
+        """Start transcribing the current processing item in the queue."""
+        current = self.batch.current_file()
+        if current:
+            self._start_transcription(current["filepath"])
+        else:
+            # Queue finished
+            self._on_queue_finished()
+
+    def _update_queue_panel(self):
+        """Refresh the queue panel UI."""
+        queue = self.batch.get_queue()
+        if queue:
+            self.queue_panel.set_items(queue)
+            self.queue_panel.show()
+        else:
+            self.queue_panel.hide()
+
+    def _cancel_batch(self):
+        """Cancel all remaining items in the queue."""
+        self.batch.cancel_all()
+        self._cancel_transcription()
+        self._update_queue_panel()
+
+    def _remove_from_queue(self, filepath):
+        """Remove a waiting item from the queue."""
+        self.batch.remove_file(filepath)
+        self._update_queue_panel()
+
+    def _on_queue_finished(self):
+        """Called when all items in the queue have been processed."""
+        self.is_transcribing = False
+        self._restore_upload_btn()
+        self._update_queue_panel()
+        stats = self.batch.stats
+        if stats["completed"] > 0:
+            msg = (
+                f"✓ Fila concluída — {stats['completed']} transcritos"
+                + (f", {stats['errors']} com erro" if stats["errors"] else "")
+            )
+            self.progress.set_complete(msg)
+            # macOS notification
+            self._send_notification("WhisperTranscribe", msg)
+        # Clear the batch queue
+        self.batch = BatchProcessor()
+        self._update_queue_panel()
+
+    def _send_notification(self, title, message):
+        """Send a macOS notification."""
+        try:
+            os.system(
+                f'osascript -e \'display notification "{message}" with title "{title}"\''
+            )
+        except Exception:
+            pass
+
+    def _open_export_modal(self):
+        """Open the bulk export modal."""
+        if not self.history_mgr.history:
+            return
+        ExportModal(self, self.history_mgr.history)
 
     def _start_transcription(self, filepath):
         self.is_transcribing = True
+        self._transcription_cancelled = False
+        self._current_process = None
+        self._elapsed_timer = None
         filename = os.path.basename(filepath)
 
-        self.upload_btn.configure(state="disabled", text="⏳ Processando...")
+        self.upload_btn.configure(
+            state="normal", text="✕ Cancelar",
+            fg_color=COLORS["danger"], hover_color=COLORS["danger_hover"],
+            command=self._cancel_transcription
+        )
         self._show_text_area()
         self.preview_title.configure(text=filename)
         self.actions_frame.pack_forget()
+        self.close_btn.pack_forget()
         self.stats_bar.clear()
 
         self.text_area.configure(state="normal")
         self.text_area.delete("0.0", "end")
-        self.text_area.insert("0.0", "Preparando transcrição...\n\nCarregando modelo WhisperKit...")
+        self.text_area.insert("0.0", "Transcrevendo...")
         self.text_area.configure(state="disabled")
 
         file_size = format_file_size(filepath)
@@ -939,33 +1219,57 @@ class WhisperApp(ctk.CTk):
         start = time.time()
         try:
             self.after(0, lambda: self.progress.set_status(
-                "Carregando modelo e processando áudio..."
+                f"Transcrevendo {filename}..."
             ))
 
+            # Start elapsed timer
+            def update_elapsed():
+                if not self._transcription_cancelled:
+                    elapsed = time.time() - start
+                    self.after(0, lambda e=elapsed: self.progress.set_status(
+                        f"Transcrevendo {filename}... ({format_duration(e)})"
+                    ))
+                    self._elapsed_timer = self.after(1000, update_elapsed)
+            self.after(0, update_elapsed)
+
             lang = self.settings.get("language")
-            cmd = [WHISPERKIT, "transcribe", "--audio-path", filepath]
-            if lang:
-                cmd += ["--language", lang]
 
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=600
-            )
+            segments = None
 
-            output = result.stdout
-            lines = output.strip().split("\n")
+            # Use server API if available, fallback to subprocess
+            if self.server.is_ready:
+                result = self.server.transcribe(filepath, language=lang)
+                text = result.get("text", "").strip()
+                segments = result.get("segments", [])
+            else:
+                # Fallback: direct subprocess call
+                cmd = [WHISPERKIT, "transcribe", "--audio-path", filepath]
+                if lang:
+                    cmd += ["--language", lang]
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+                )
+                self._current_process = proc
+                stdout, stderr = proc.communicate(timeout=600)
 
-            text_lines = []
-            skip_prefixes = (
-                "[WhisperKit]", "Pipeline", "  Token", "  Audio",
-                "  First", "  Total", "  Model", "  Fallback",
-                "  Decode", "-=-", "  Speed", "  Real", "  Number"
-            )
-            for line in lines:
-                stripped = line.strip()
-                if stripped and not any(stripped.startswith(p) for p in skip_prefixes):
-                    text_lines.append(stripped)
+                skip_prefixes = (
+                    "[WhisperKit]", "Pipeline", "  Token", "  Audio",
+                    "  First", "  Total", "  Model", "  Fallback",
+                    "  Decode", "-=-", "  Speed", "  Real", "  Number"
+                )
+                text_lines = []
+                for line in stdout.strip().split("\n"):
+                    stripped = line.strip()
+                    if stripped and not any(stripped.startswith(p) for p in skip_prefixes):
+                        text_lines.append(stripped)
+                text = " ".join(text_lines).strip()
 
-            text = " ".join(text_lines).strip()
+            # Stop elapsed timer (dispatch to main thread)
+            self.after(0, self._stop_elapsed_timer)
+
+            if self._transcription_cancelled:
+                return
+
             elapsed = time.time() - start
 
             if not text:
@@ -978,7 +1282,7 @@ class WhisperApp(ctk.CTk):
                 ))
                 return
 
-            entry = self.history_mgr.add(filename, filepath, text, elapsed)
+            entry = self.history_mgr.add(filename, filepath, text, elapsed, segments=segments)
 
             # Save .txt next to original if setting enabled
             if self.settings.get("save_txt"):
@@ -991,16 +1295,39 @@ class WhisperApp(ctk.CTk):
 
             self.after(0, lambda: self._transcription_done(entry, elapsed))
 
-        except subprocess.TimeoutExpired:
-            self.after(0, lambda: self._transcription_error(
-                "⏱ Timeout — o arquivo é muito longo.\n\n"
-                "O limite é de 10 minutos de processamento.\n"
-                "Tente um arquivo menor ou corte o áudio."
-            ))
         except Exception as e:
+            self.after(0, self._stop_elapsed_timer)
             self.after(0, lambda: self._transcription_error(
                 f"Erro inesperado:\n\n{str(e)}"
             ))
+
+    def _stop_elapsed_timer(self):
+        """Stop the elapsed timer (must be called from main thread)."""
+        if self._elapsed_timer:
+            try:
+                self.after_cancel(self._elapsed_timer)
+            except Exception:
+                pass
+            self._elapsed_timer = None
+
+    def _cancel_transcription(self):
+        """Cancel the running transcription."""
+        self._transcription_cancelled = True
+        if self._current_process and self._current_process.poll() is None:
+            self._current_process.kill()
+        self._stop_elapsed_timer()
+        self.is_transcribing = False
+        self._restore_upload_btn()
+        self.selected_entry_id = None
+        self._show_drop_zone()
+
+    def _restore_upload_btn(self):
+        """Restore the upload button to its default state."""
+        self.upload_btn.configure(
+            state="normal", text="  ＋  Transcrever",
+            fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
+            command=self._pick_file
+        )
 
     def _transcription_done(self, entry, elapsed):
         self.is_transcribing = False
@@ -1008,10 +1335,9 @@ class WhisperApp(ctk.CTk):
 
         time_str = format_duration(elapsed)
         words = entry.get("words", 0)
-        self.progress.set_complete(f"✓ Concluído em {time_str} — {words} palavras transcritas")
 
-        self.upload_btn.configure(state="normal", text="  ＋  Transcrever")
         self.preview_title.configure(text=entry["filename"])
+        self.close_btn.pack(side="right", padx=(6, 0))
         self.actions_frame.pack(side="right")
         self.stats_bar.update_stats(entry)
 
@@ -1022,16 +1348,45 @@ class WhisperApp(ctk.CTk):
 
         self._refresh_history()
 
+        # Advance the batch queue
+        next_item = self.batch.next()
+        self._update_queue_panel()
+        if next_item:
+            stats = self.batch.stats
+            self.progress.set_status(
+                f"✓ {entry['filename']} concluído — próximo na fila ({stats['remaining']} restantes)"
+            )
+            self.after(500, self._process_next_in_queue)
+        else:
+            self.progress.set_complete(f"✓ Concluído em {time_str} — {words} palavras transcritas")
+            self._on_queue_finished()
+
     def _transcription_error(self, msg):
         self.is_transcribing = False
         self.progress.stop()
         self.progress.hide()
-        self.upload_btn.configure(state="normal", text="  ＋  Transcrever")
+        self._restore_upload_btn()
+
+        # Show error with close button so user can dismiss
+        self.preview_title.configure(text="Erro na transcrição")
+        self.close_btn.pack(side="right", padx=(6, 0))
+        self.actions_frame.pack_forget()
 
         self.text_area.configure(state="normal")
         self.text_area.delete("0.0", "end")
         self.text_area.insert("0.0", msg)
         self.text_area.configure(state="disabled")
+
+        # Mark error in batch and advance
+        current = self.batch.current_file()
+        if current:
+            self.batch.mark_error(current["filepath"])
+        next_item = self.batch.next()
+        self._update_queue_panel()
+        if next_item:
+            self.after(1000, self._process_next_in_queue)
+        else:
+            self._on_queue_finished()
 
 
 if __name__ == "__main__":

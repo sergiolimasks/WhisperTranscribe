@@ -12,8 +12,8 @@ OPTIONS = {
         'CFBundleName': 'WhisperTranscribe',
         'CFBundleDisplayName': 'WhisperTranscribe',
         'CFBundleIdentifier': 'com.whispertranscribe.app',
-        'CFBundleVersion': '1.0.0',
-        'CFBundleShortVersionString': '1.0.0',
+        'CFBundleVersion': '2.0.0',
+        'CFBundleShortVersionString': '2.0.0',
         'LSMinimumSystemVersion': '13.0',
         'NSHighResolutionCapable': True,
         'CFBundleDocumentTypes': [
@@ -30,7 +30,11 @@ OPTIONS = {
         ],
     },
     'packages': ['customtkinter'],
-    'includes': ['tkinter', 'json', 'threading', 'subprocess', 'pathlib'],
+    'includes': [
+        'tkinter', 'json', 'threading', 'subprocess', 'pathlib',
+        'shared', 'macos_drop', 'batch_queue', 'export_modal', 'whisper_server',
+        'objc', 'Foundation', 'AppKit',
+    ],
 }
 
 setup(
