@@ -29,7 +29,7 @@ OPTIONS = {
             }
         ],
     },
-    'packages': ['customtkinter'],
+    'packages': ['customtkinter', 'yt_dlp'],
     'includes': [
         'tkinter', 'json', 'threading', 'subprocess', 'pathlib',
         'shared', 'macos_drop', 'batch_queue', 'export_modal', 'whisper_server',
