@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""WhisperTranscribe v2.0 — App premium de transcrição de áudio/vídeo."""
+"""WhisperTranscribe v3.0 — App premium de transcrição de áudio/vídeo."""
 
 import customtkinter as ctk
 import tkinter as tk
@@ -16,6 +16,8 @@ from shared import COLORS, AUDIO_VIDEO_EXTENSIONS, WHISPERKIT, format_duration, 
 from batch_queue import BatchProcessor, QueuePanel
 from export_modal import ExportModal
 from whisper_server import WhisperServer
+from app_http_server import AppHttpServer
+from url_downloader import download_audio
 
 # --- Config ---
 HISTORY_DIR = Path.home() / ".whisper_transcribe"
@@ -443,6 +445,7 @@ class WhisperApp(ctk.CTk):
         self.batch = BatchProcessor()
         self.server = WhisperServer()
         self._server_ready = False
+        self.http_server = AppHttpServer(self)
 
         w = self.settings.get("window_width")
         h = self.settings.get("window_height")
@@ -514,6 +517,7 @@ class WhisperApp(ctk.CTk):
         self._server_ready = True
         self.progress.set_complete("✓ WhisperKit pronto")
         self._restore_upload_btn()
+        self.http_server.start()
 
     def _on_server_error(self, error_msg):
         """Called if WhisperKit server fails to start."""
@@ -546,7 +550,21 @@ class WhisperApp(ctk.CTk):
                 "  brew install whisperkit-cli"
             )
 
+        # yt-dlp is optional (needed for browser extension)
+        from shared import YTDLP
+        ytdlp_paths = ["/opt/homebrew/bin/yt-dlp", "/usr/local/bin/yt-dlp"]
+        has_ytdlp = os.path.exists(YTDLP) or any(os.path.exists(p) for p in ytdlp_paths)
+        if not has_ytdlp:
+            missing.append(
+                "yt-dlp (download de vídeos — opcional):\n"
+                "  brew install yt-dlp"
+            )
+
+        # Only block startup for core deps (brew + whisperkit)
+        critical_missing = not has_brew or not has_whisperkit
         if not missing:
+            return True
+        if not critical_missing:
             return True
 
         # Build the message
@@ -589,6 +607,7 @@ class WhisperApp(ctk.CTk):
 
     def _on_close(self):
         """Shutdown server and close app."""
+        self.http_server.stop()
         self.server.stop()
         self.destroy()
 
@@ -1123,6 +1142,31 @@ class WhisperApp(ctk.CTk):
         ]
         if valid:
             self._add_to_queue(valid)
+
+    # --- URL download ---
+
+    def _download_and_queue(self, url):
+        """Download audio from URL and add to transcription queue."""
+        log.info(f"_download_and_queue: {url}")
+        self.progress.start_pulse(f"Baixando: {url[:60]}...")
+
+        def _do_download():
+            try:
+                def on_progress(msg):
+                    self.after(0, lambda m=msg: self.progress.set_status(m))
+
+                result = download_audio(url, on_progress=on_progress)
+                filepath = result["filepath"]
+                log.info(f"Download complete: {filepath}")
+                self.after(0, lambda fp=filepath: self._add_to_queue([fp]))
+            except Exception as e:
+                log.error(f"Download failed: {e}")
+                self.after(0, lambda: self.progress.set_status(f"✕ Erro no download: {e}"))
+                self.after(0, lambda: self.progress.stop())
+                self.after(5000, lambda: self.progress.hide())
+
+        thread = threading.Thread(target=_do_download, daemon=True)
+        thread.start()
 
     # --- Batch queue ---
 
