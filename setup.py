@@ -12,8 +12,8 @@ OPTIONS = {
         'CFBundleName': 'WhisperTranscribe',
         'CFBundleDisplayName': 'WhisperTranscribe',
         'CFBundleIdentifier': 'com.whispertranscribe.app',
-        'CFBundleVersion': '3.0.0',
-        'CFBundleShortVersionString': '3.0.0',
+        'CFBundleVersion': '3.0.1',
+        'CFBundleShortVersionString': '3.0.1',
         'LSMinimumSystemVersion': '13.0',
         'NSHighResolutionCapable': True,
         'CFBundleDocumentTypes': [

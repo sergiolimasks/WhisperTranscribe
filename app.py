@@ -161,6 +161,14 @@ class AnimatedProgress(ctk.CTkFrame):
             text_color=COLORS["text_dim"], height=20
         )
 
+        self.retry_btn = ctk.CTkButton(
+            self, text="↻ Reiniciar servidor",
+            font=("SF Pro Display", 12, "bold"),
+            fg_color=COLORS["accent"], hover_color=COLORS["accent_dim"],
+            corner_radius=8, height=28, width=160,
+        )
+        self._retry_visible = False
+
     def show(self):
         if not self._visible:
             self.canvas.pack(fill="x", padx=0, pady=(0, 2))
@@ -168,10 +176,23 @@ class AnimatedProgress(ctk.CTkFrame):
             self._visible = True
 
     def hide(self):
+        self.hide_retry()
         if self._visible:
             self.canvas.pack_forget()
             self.status_label.pack_forget()
             self._visible = False
+
+    def show_retry(self, on_click):
+        self.show()
+        self.retry_btn.configure(command=on_click)
+        if not self._retry_visible:
+            self.retry_btn.pack(pady=(6, 0))
+            self._retry_visible = True
+
+    def hide_retry(self):
+        if self._retry_visible:
+            self.retry_btn.pack_forget()
+            self._retry_visible = False
 
     def start_pulse(self, status="Transcrevendo..."):
         self.show()
@@ -502,10 +523,13 @@ class WhisperApp(ctk.CTk):
 
     def _show_server_loading(self):
         """Show loading state while WhisperKit server starts."""
+        self.progress.hide_retry()
         self.upload_btn.configure(state="disabled", text="⏳ Iniciando...")
         self.progress.start_pulse("Carregando modelo WhisperKit...")
         lang = self.settings.get("language")
-        self.server.start(
+        # Use restart() so a second call after a failure cleans up any
+        # leftover process before spawning a new one.
+        self.server.restart(
             language=lang,
             on_ready=lambda: self.after(0, self._on_server_ready),
             on_error=lambda e: self.after(0, lambda: self._on_server_error(e)),
@@ -525,6 +549,7 @@ class WhisperApp(ctk.CTk):
         self._server_ready = False
         self.progress.stop()
         self.progress.set_status(f"✕ Erro: {error_msg}")
+        self.progress.show_retry(self._show_server_loading)
         self._restore_upload_btn()
 
     def _check_dependencies(self):
